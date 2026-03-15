@@ -106,6 +106,47 @@ The script creates a `granola_sync.log` file in the current directory with detai
 2025-01-15 10:30:03 - INFO - Sync complete. 25/25 notes saved to /your/output/folder
 ```
 
+## Vector Search
+
+Search your meeting notes semantically using OpenAI embeddings and ChromaDB.
+
+### Setup
+```bash
+pip install -r requirements.txt
+export OPENAI_API_KEY='sk-...'
+```
+
+### Index your notes
+```bash
+# Index all exported notes
+python vectorize.py index -d ~/Claude/Granola
+
+# Re-index everything from scratch
+python vectorize.py index -d ~/Claude/Granola --reindex
+```
+
+### Search
+```bash
+# Semantic search
+python vectorize.py search "budget discussion Q1"
+
+# More results
+python vectorize.py search "onboarding process" -n 10
+
+# Search only notes (skip transcripts)
+python vectorize.py search "action items" -s notes
+
+# Search only transcripts
+python vectorize.py search "who mentioned the deadline" -s transcript
+```
+
+### Stats
+```bash
+python vectorize.py stats
+```
+
+The vector database is stored locally at `~/.local/share/granola-vectors/`.
+
 ## Limitations
 - macOS only (due to Granola credential file location)
 - Requires Granola desktop app to be installed and logged in

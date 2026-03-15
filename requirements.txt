@@ -1,1 +1,5 @@
 requests>=2.28.0,<3.0
+
+# Vector search dependencies (for vectorize.py)
+chromadb>=0.5.0,<1.0
+openai>=1.0.0,<2.0
