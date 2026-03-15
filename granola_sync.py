@@ -1,16 +1,21 @@
+import argparse
 import logging
 import json
+import os
+import platform
 import requests
+import sys
 import time
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, List, Any
 
 # --- Configuration ---
-OUTPUT_DIR = Path("/Users/maxxyung/Claude/Granola")
+DEFAULT_OUTPUT_DIR = Path("/Users/maxxyung/Claude/Granola")
 CREDS_FILE = Path.home() / "Library/Application Support/Granola/supabase.json"
 API_BASE_URL = "https://api.granola.ai"
 USER_AGENT = "Granola/5.354.0"
+DEFAULT_LIMIT = 100
 
 # --- Logging Setup ---
 logging.basicConfig(
@@ -22,6 +27,17 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+
+def check_platform():
+    """Verify we're running on macOS where Granola stores credentials."""
+    if platform.system() != "Darwin":
+        logger.error(
+            f"Unsupported platform: {platform.system()}. "
+            "Granola stores credentials in ~/Library/Application Support/, "
+            "which is only available on macOS."
+        )
+        sys.exit(1)
 
 def load_access_token() -> Optional[str]:
     """Retrieves the access token from the local Granola configuration file."""
@@ -59,23 +75,45 @@ def get_headers(token: str) -> Dict[str, str]:
         "X-Client-Version": USER_AGENT.split('/')[1]
     }
 
-def fetch_documents(token: str) -> List[Dict[str, Any]]:
-    """Retrieves metadata for all available Granola documents."""
+def fetch_documents(token: str, limit: int = DEFAULT_LIMIT) -> List[Dict[str, Any]]:
+    """Retrieves metadata for all available Granola documents with pagination."""
     url = f"{API_BASE_URL}/v2/get-documents"
-    payload = {
-        "limit": 100,
-        "offset": 0,
-        "include_last_viewed_panel": True
-    }
-    
-    try:
-        response = requests.post(url, headers=get_headers(token), json=payload)
-        response.raise_for_status()
-        data = response.json()
-        return data.get("docs", [])
-    except requests.RequestException as e:
-        logger.error(f"API Error (get-documents): {e}")
-        return []
+    all_docs = []
+    offset = 0
+    page_size = min(limit, 100)
+
+    while True:
+        payload = {
+            "limit": page_size,
+            "offset": offset,
+            "include_last_viewed_panel": True
+        }
+
+        try:
+            response = requests.post(url, headers=get_headers(token), json=payload)
+            response.raise_for_status()
+            data = response.json()
+            docs = data.get("docs", [])
+        except requests.RequestException as e:
+            logger.error(f"API Error (get-documents, offset={offset}): {e}")
+            break
+
+        if not docs:
+            break
+
+        all_docs.extend(docs)
+
+        if len(all_docs) >= limit:
+            all_docs = all_docs[:limit]
+            break
+
+        if len(docs) < page_size:
+            break
+
+        offset += len(docs)
+        time.sleep(0.1)
+
+    return all_docs
 
 def fetch_transcript(token: str, doc_id: str) -> Optional[List[Dict[str, Any]]]:
     """Retrieves the full transcript for a specific document ID."""
@@ -228,28 +266,28 @@ def extract_people(doc: Dict[str, Any]) -> Dict[str, Any]:
         'attendees': attendees_info
     }
 
-def sync_document(doc: Dict[str, Any], token: str) -> bool:
+def sync_document(doc: Dict[str, Any], token: str, output_dir: Path) -> bool:
     doc_id = doc.get("id")
     title = doc.get("title", "Untitled")
     created_at_str = doc.get('created_at', '')
-    
+
     if not doc_id:
         return False
 
     # --- 1. Date Parsing & Folder Setup ---
     date_prefix = "0000-00-00"
     year_folder = "Unknown_Year"
-    
+
     if created_at_str:
         try:
             dt = datetime.fromisoformat(created_at_str.replace('Z', '+00:00'))
             date_prefix = dt.strftime('%Y-%m-%d')
             year_folder = str(dt.year)
         except ValueError:
-            pass
-            
+            logger.warning(f"Could not parse date '{created_at_str}' for '{title}'")
+
     # Create Year Subfolder if it doesn't exist (e.g. /2025/)
-    target_dir = OUTPUT_DIR / year_folder
+    target_dir = output_dir / year_folder
     if not target_dir.exists():
         try:
             target_dir.mkdir(parents=True, exist_ok=True)
@@ -286,22 +324,24 @@ def sync_document(doc: Dict[str, Any], token: str) -> bool:
     time.sleep(0.1)
 
     # --- 4. YAML Frontmatter ---
-    safe_title = title.replace('"', '\\"')
-    
+    def yaml_escape(value: str) -> str:
+        """Escape a string for safe use as a YAML double-quoted value."""
+        return value.replace('\\', '\\\\').replace('"', '\\"')
+
     frontmatter = "---\n"
     frontmatter += f"granola_id: {doc_id}\n"
-    frontmatter += f"title: \"{safe_title}\"\n"
+    frontmatter += f'title: "{yaml_escape(title)}"\n'
     frontmatter += f"created_at: {created_at_str}\n"
-    
+
     frontmatter += "participants:\n"
-    frontmatter += f"  - name: \"{people['creator']['name']}\"\n"
+    frontmatter += f'  - name: "{yaml_escape(people["creator"]["name"])}"\n'
     if people['creator']['email']:
-        frontmatter += f"    email: \"{people['creator']['email']}\"\n"
-        
+        frontmatter += f'    email: "{yaml_escape(people["creator"]["email"])}"\n'
+
     for att in people['attendees']:
-        frontmatter += f"  - name: \"{att['name']}\"\n"
+        frontmatter += f'  - name: "{yaml_escape(att["name"] or "")}"\n'
         if att['email']:
-            frontmatter += f"    email: \"{att['email']}\"\n"
+            frontmatter += f'    email: "{yaml_escape(att["email"])}"\n'
 
     frontmatter += "---\n\n"
     
@@ -316,11 +356,37 @@ def sync_document(doc: Dict[str, Any], token: str) -> bool:
         logger.error(f"Failed to write {filename}: {e}")
         return False
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Export Granola meeting notes to local Markdown files."
+    )
+    parser.add_argument(
+        "-o", "--output-dir",
+        type=Path,
+        default=os.environ.get("GRANOLA_OUTPUT_DIR", str(DEFAULT_OUTPUT_DIR)),
+        help=f"Output directory for Markdown files (default: {DEFAULT_OUTPUT_DIR}). "
+             "Can also be set via GRANOLA_OUTPUT_DIR env var.",
+    )
+    parser.add_argument(
+        "-l", "--limit",
+        type=int,
+        default=int(os.environ.get("GRANOLA_LIMIT", "0")),
+        help="Maximum number of documents to fetch (default: all).",
+    )
+    return parser.parse_args()
+
+
 def main():
-    if not OUTPUT_DIR.exists():
+    check_platform()
+
+    args = parse_args()
+    output_dir = Path(args.output_dir)
+    limit = args.limit if args.limit > 0 else DEFAULT_LIMIT * 100  # effectively unlimited
+
+    if not output_dir.exists():
         try:
-            OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-            logger.info(f"Created output directory: {OUTPUT_DIR}")
+            output_dir.mkdir(parents=True, exist_ok=True)
+            logger.info(f"Created output directory: {output_dir}")
         except OSError as e:
             logger.critical(f"Could not create output directory: {e}")
             return
@@ -330,19 +396,19 @@ def main():
         return
 
     logger.info("Fetching document list...")
-    documents = fetch_documents(token)
+    documents = fetch_documents(token, limit=limit)
     logger.info(f"Found {len(documents)} documents.")
 
     success_count = 0
     for doc in documents:
         try:
-            if sync_document(doc, token):
+            if sync_document(doc, token, output_dir):
                 success_count += 1
-        except Exception as e:
-            logger.error(f"CRITICAL ERROR processing doc '{doc.get('title')}': {e}")
+        except (KeyError, ValueError, TypeError, OSError) as e:
+            logger.error(f"Error processing doc '{doc.get('title')}': {e}")
             continue
 
-    logger.info(f"Sync complete. {success_count}/{len(documents)} notes saved to {OUTPUT_DIR}")
+    logger.info(f"Sync complete. {success_count}/{len(documents)} notes saved to {output_dir}")
 
 if __name__ == "__main__":
     main()

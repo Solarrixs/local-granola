@@ -13,24 +13,9 @@ A Python script that exports your [Granola](https://granola.ai) meeting notes to
 ## Requirements
 - Python 3.8+
 - Granola desktop app installed and logged in (macOS)
-- `requests` library
 
 ```bash
-pip install requests
-```
-
-## Configuration
-**Important:** Before running, you must set your output directory.
-
-Edit `granola_sync.py` and change line 10:
-
-```python
-OUTPUT_DIR = Path("/path/to/your/notes/folder")
-```
-
-For example:
-```python
-OUTPUT_DIR = Path.home() / "Documents" / "Meeting Notes"
+pip install -r requirements.txt
 ```
 
 ## Usage
@@ -38,9 +23,29 @@ OUTPUT_DIR = Path.home() / "Documents" / "Meeting Notes"
 python granola_sync.py
 ```
 
+### CLI Options
+```
+-o, --output-dir PATH   Output directory (default: ~/Claude/Granola)
+-l, --limit N           Max documents to fetch (default: all)
+```
+
+You can also set the output directory via the `GRANOLA_OUTPUT_DIR` environment variable.
+
+### Examples
+```bash
+# Use default output directory
+python granola_sync.py
+
+# Custom output directory
+python granola_sync.py -o ~/Documents/Meeting\ Notes
+
+# Fetch only the 50 most recent documents
+python granola_sync.py --limit 50
+```
+
 The script will:
 1. Read your Granola authentication token from `~/Library/Application Support/Granola/supabase.json`
-2. Fetch all your meeting documents from the Granola API
+2. Fetch all your meeting documents from the Granola API (with pagination)
 3. Export each meeting as a Markdown file to your configured output directory
 
 ## Output Structure
@@ -105,7 +110,6 @@ The script creates a `granola_sync.log` file in the current directory with detai
 - macOS only (due to Granola credential file location)
 - Requires Granola desktop app to be installed and logged in
 - Cannot distinguish between multiple remote speakers
-- Fetches up to 100 documents per run
 
 ## License
 MIT or whatever
